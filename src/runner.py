@@ -12,9 +12,24 @@ from src.config import (
     RESULTS_DIR, CTX_DIR,
     DATASET_SIZES, TOOL_MODES, BACKENDS,
     LIMIT_QUESTIONS, ANTHROPIC_MODEL, OPENAI_MODEL,
+    ANTHROPIC_API_KEY, OPENAI_API_KEY,
 )
 from src.data_loader import load_questions, prepare_all_context_files
 from src.agent import AgentRunner
+
+
+def should_skip_backend(backend: str) -> str | None:
+    """
+    检查某个 backend 是否应该跳过。
+    返回 None 表示可以运行，返回字符串表示跳过原因。
+    """
+    if backend == "anthropic":
+        if not ANTHROPIC_API_KEY or ANTHROPIC_API_KEY.startswith("sk-ant-xxxxx"):
+            return "未配置 ANTHROPIC_API_KEY（占位符或为空）"
+    elif backend == "openai":
+        if not OPENAI_API_KEY:
+            return "未配置 OPENAI_API_KEY"
+    return None
 
 
 def get_result_path(dataset_size: str, tool_mode: str, backend: str) -> Path:
@@ -128,14 +143,24 @@ def run_all():
     print(f"  模型: Anthropic={ANTHROPIC_MODEL}, OpenAI={OPENAI_MODEL}")
     print(f"  {'#'*60}")
 
+    skipped_all = True
     for dataset_size in DATASET_SIZES:
         for tool_mode in TOOL_MODES:
             for backend in BACKENDS:
+                skip_reason = should_skip_backend(backend)
+                if skip_reason:
+                    print(f"\n  ⏭ 跳过 [{dataset_size}/{tool_mode}/{backend}]: {skip_reason}")
+                    continue
+                skipped_all = False
                 run_experiment(
                     dataset_size=dataset_size,
                     tool_mode=tool_mode,
                     backend=backend,
                 )
+
+    if skipped_all:
+        print(f"\n  ⚠ 所有 backend 都未配置 API Key，无法运行任何实验。")
+        print(f"  请编辑 .env 文件，填入至少一个真实的 API Key。")
 
     print(f"\n{'#'*60}")
     print(f"  所有实验完成!")
