@@ -1,17 +1,20 @@
 """
 实验运行器：遍历实验矩阵，运行 Agent，收集结果
 支持断点续传 —— 已跑过的问题会自动跳过
+支持并发 —— 设置 MAX_WORKERS > 1 可同时跑多个问题
 """
 import json
 import time
-import sys
+import threading
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.config import (
     RESULTS_DIR, CTX_DIR,
     DATASET_SIZES, TOOL_MODES, BACKENDS,
-    LIMIT_QUESTIONS, ANTHROPIC_MODEL, OPENAI_MODEL,
+    LIMIT_QUESTIONS, MAX_WORKERS,
+    ANTHROPIC_MODEL, OPENAI_MODEL,
     ANTHROPIC_API_KEY, OPENAI_API_KEY,
 )
 from src.data_loader import load_questions, prepare_all_context_files
@@ -94,16 +97,23 @@ def run_experiment(
         print(f"  ✓ 全部完成, 跳过")
         return
 
-    # 初始化 Agent
+    # 初始化 Agent（每个线程独立创建自己的 agent 实例）
     print(f"  初始化 Agent...")
-    agent = AgentRunner(backend=backend, tool_mode=tool_mode)
+
+    # 并发模式提示
+    if MAX_WORKERS > 1:
+        print(f"  并发模式: {MAX_WORKERS} workers")
 
     # 逐题运行
-    for idx, q in enumerate(remaining, start=1):
+    _write_lock = threading.Lock()
+
+    def run_one_question(q, idx, total):
+        """运行单个问题（供并发调用）"""
         context_file = q.context_file_path()
+        # 每个线程创建独立的 agent 实例（确保线程安全）
+        agent = AgentRunner(backend=backend, tool_mode=tool_mode)
 
-        print(f"\n  [{idx}/{len(remaining)}] Q: {q.query[:80]}...")
-
+        print(f"\n  [{idx}/{total}] Q: {q.query[:80]}...")
         t_start = time.time()
 
         try:
@@ -128,7 +138,29 @@ def run_experiment(
             "elapsed_seconds": round(elapsed, 2),
             "timestamp": datetime.now().isoformat(),
         }
-        save_result(result_path, record)
+
+        with _write_lock:
+            save_result(result_path, record)
+
+        return record
+
+    if MAX_WORKERS <= 1:
+        # 顺序模式
+        for idx, q in enumerate(remaining, start=1):
+            run_one_question(q, idx, len(remaining))
+    else:
+        # 并发模式
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(run_one_question, q, i + 1, len(remaining)): q
+                for i, q in enumerate(remaining)
+            }
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    q = futures[future]
+                    print(f"    ✗ 问题 {q.id} 执行失败: {e}")
 
     print(f"\n  ✓ 配置 [{dataset_size}/{tool_mode}/{backend}] 完成!")
     print(f"    结果保存至: {result_path}")

@@ -69,3 +69,6 @@ _LIMIT_STR = os.getenv("LIMIT_QUESTIONS", "")
 LIMIT_QUESTIONS = int(_LIMIT_STR) if _LIMIT_STR.strip() else None
 
 RETRY_COUNT = int(os.getenv("RETRY_COUNT", "3"))
+
+# ── 并发控制 ────────────────────────────────────────────
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "1"))  # 1=顺序, >1=并发
