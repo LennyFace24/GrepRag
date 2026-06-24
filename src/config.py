@@ -26,6 +26,7 @@ CTX_DIR.mkdir(exist_ok=True)
 CLAUDE_CLI_MODEL = os.getenv("CLAUDE_CLI_MODEL", "")   # 留空=用 CLI 默认
 CODEX_CLI_MODEL = os.getenv("CODEX_CLI_MODEL", "")     # 留空=用 CLI 默认
 CLI_AGENT_TIMEOUT = int(os.getenv("CLI_AGENT_TIMEOUT", "300"))
+CLI_TEMPERATURE = float(os.getenv("CLI_TEMPERATURE", "0.1"))  # CLI agent 推理温度
 
 # ── Embedding 模型（vector search CLI 使用）─────────────
 DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh")

@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from src.config import (
-    CLI_AGENT_TIMEOUT,
+    CLI_AGENT_TIMEOUT, CLI_TEMPERATURE,
     RATE_LIMIT_DELAY_MIN, RATE_LIMIT_DELAY_MAX,
     RATE_LIMIT_BACKOFF, RATE_LIMIT_MAX_RETRIES,
 )
@@ -180,6 +180,9 @@ class CLIAgentRunner:
         # 自动化标志：跳过权限确认
         cmd += ["--dangerously-skip-permissions"]
 
+        # temperature（通过 JSON settings 注入）
+        cmd += ["--settings", f'{{"temperature":{CLI_TEMPERATURE}}}']
+
         # 工具白名单
         if self.tool_mode == "grep":
             cmd += ["--allowedTools", f"Bash(grep:*)", f"Bash(cat:{context_file})"]
@@ -203,7 +206,8 @@ class CLIAgentRunner:
             "--dangerously-bypass-approvals-and-sandbox",
         ]
 
-        # 模型（留空则用 Codex CLI 自身配置的默认模型）
+        # 模型 + temperature
+        cmd += ["-c", f"temperature={CLI_TEMPERATURE}"]
         if self._model:
             cmd += ["--model", self._model]
 
