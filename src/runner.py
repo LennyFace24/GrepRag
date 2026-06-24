@@ -3,7 +3,7 @@ import json, time, threading
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from src.config import RESULTS_DIR, CTX_DIR, SIZES, MODES, BACKENDS, LIMIT, WORKERS, CLAUDE_MODEL, CODEX_MODEL
+from src.config import RESULTS_DIR, CTX_DIR, SIZES, MODES, BACKENDS, LIMIT, WORKERS, CLAUDE_MODEL, CODEX_MODEL, EMBED_PROVIDER, EMBED_MODEL, QWEN_EMBED_MODEL
 from src.data_loader import load, prepare
 from src.cli_agent import CLIAgentRunner
 
@@ -42,7 +42,8 @@ def _run_one(q, idx, total, size, mode, backend, model):
     })
 
 def run_experiment(size="small", mode="grep", backend="claude"):
-    print(f"\n{'='*50}\n  实验: {size} | {mode} | {backend}\n{'='*50}")
+    emb_info = f"{EMBED_PROVIDER}/{QWEN_EMBED_MODEL}" if EMBED_PROVIDER == "qwen" else f"{EMBED_PROVIDER}/{EMBED_MODEL}"
+    print(f"\n{'='*50}\n  实验: {size} | {mode} | {backend} | embed={emb_info}\n{'='*50}")
     qs = load(size, LIMIT)
     prepare(qs)
     remaining = [q for q in qs if q.id not in _completed(_path(size, mode, backend))]
