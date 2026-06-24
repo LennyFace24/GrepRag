@@ -1,7 +1,18 @@
-"""可插拔 Embedding：默认 BGE, 预留 Qwen 接口"""
+"""可插拔 Embedding：BGE(本地) / Qwen(API, TCP 长连接复用)"""
+import json
+import http.client
 from abc import ABC, abstractmethod
 import numpy as np
 from src.config import EMBED_MODEL, EMBED_DEVICE, CHUNK_SIZE, CHUNK_OVERLAP
+
+# 全局复用 TCP 连接
+_conn: http.client.HTTPSConnection | None = None
+
+def _get_conn() -> http.client.HTTPSConnection:
+    global _conn
+    if _conn is None:
+        _conn = http.client.HTTPSConnection("ai.gitee.com")
+    return _conn
 
 class BaseEmbedding(ABC):
     @abstractmethod
@@ -11,6 +22,7 @@ class BaseEmbedding(ABC):
     def dim(self) -> int: ...
 
 class BGEEmbedding(BaseEmbedding):
+    """本地 BGE-small-zh"""
     def __init__(self, model: str = EMBED_MODEL, device: str = EMBED_DEVICE):
         from sentence_transformers import SentenceTransformer
         self._m = SentenceTransformer(model, device=device)
@@ -19,15 +31,29 @@ class BGEEmbedding(BaseEmbedding):
         return np.asarray(self._m.encode(texts, normalize_embeddings=True, show_progress_bar=False), dtype=np.float32)
 
     @property
-    def dim(self) -> int:
-        return self._m.get_sentence_embedding_dimension()
+    def dim(self) -> int: return self._m.get_sentence_embedding_dimension()
 
 class QwenEmbedding(BaseEmbedding):
-    """预留: 对接 Qwen embedding API"""
-    def __init__(self, endpoint: str, key: str):
-        self._ep, self._key, self._dim = endpoint, key, 1024
+    """Qwen Embedding (ai.gitee.com), stdlib http.client + TCP 长连接"""
+    def __init__(self, endpoint: str, key: str = "", model: str = "Qwen3-Embedding-0.6B"):
+        self._model = model
+        self._key = key
+        self._dim = 1024
+
     def embed(self, texts: list[str]) -> np.ndarray:
-        raise NotImplementedError("请在 embed() 中填入 Qwen API 调用逻辑")
+        body = json.dumps({
+            "model": self._model,
+            "input": texts,
+            "encoding_format": "float",
+        })
+        headers = {"Content-Type": "application/json"}
+        conn = _get_conn()
+        conn.request("POST", "/v1/embeddings", body, headers)
+        r = conn.getresponse()
+        data = json.loads(r.read().decode("utf-8"))
+        items = sorted(data["data"], key=lambda x: x["index"])
+        return np.array([it["embedding"] for it in items], dtype=np.float32)
+
     @property
     def dim(self) -> int: return self._dim
 

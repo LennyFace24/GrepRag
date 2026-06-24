@@ -26,9 +26,14 @@ CODEX_MODEL = _env("CODEX_CLI_MODEL")
 CLI_TIMEOUT = int(_env("CLI_AGENT_TIMEOUT") or 300)
 CLI_TEMP = float(_env("CLI_TEMPERATURE") or 0.1)
 
-# Embedding
+# Embedding: "bge"(本地) 或 "qwen"(API)
+EMBED_PROVIDER = _env("EMBED_PROVIDER") or "bge"
 EMBED_MODEL = _env("EMBEDDING_MODEL") or "BAAI/bge-small-zh"
 EMBED_DEVICE = _env("EMBEDDING_DEVICE") or "cpu"
+# Qwen API（embed_provider=qwen 时需要）
+QWEN_EMBED_ENDPOINT = _env("QWEN_EMBED_ENDPOINT") or "https://ai.gitee.com/v1"
+QWEN_EMBED_KEY = _env("QWEN_EMBED_KEY") or ""
+QWEN_EMBED_MODEL = _env("QWEN_EMBED_MODEL") or "Qwen3-Embedding-0.6B"
 
 # 检索参数
 TOP_K = int(_env("VECTOR_TOP_K") or 5)
