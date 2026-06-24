@@ -50,8 +50,12 @@ TOOL_MODES = _parse_list("TOOL_MODES", ["grep", "vector"])
 BACKENDS = _parse_list("BACKENDS", ["claude", "codex"])
 
 # ── 运行控制 ────────────────────────────────────────────
-_LIMIT_STR = os.getenv("LIMIT_QUESTIONS", "")
-LIMIT_QUESTIONS = int(_LIMIT_STR) if _LIMIT_STR.strip() else None
+def _strip_comment(val: str) -> str:
+    """去除行内注释（# 之后的内容）"""
+    return val.split("#")[0].strip()
+
+_LIMIT_STR = _strip_comment(os.getenv("LIMIT_QUESTIONS", ""))
+LIMIT_QUESTIONS = int(_LIMIT_STR) if _LIMIT_STR else None
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "1"))
 RETRY_COUNT = int(os.getenv("RETRY_COUNT", "3"))
 
