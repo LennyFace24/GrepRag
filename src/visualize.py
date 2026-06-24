@@ -226,7 +226,8 @@ def plot_comparison(save_path: str | None = None):
                 box_labels.append(f"{tm}\n{be}")
 
     if box_data:
-        bp = ax.boxplot(box_data, labels=box_labels, patch_artist=True)
+        bp = ax.boxplot(box_data, patch_artist=True)
+        ax.set_xticklabels(box_labels, fontsize=8)
         for patch, tm in zip(bp['boxes'], [t for t in TOOL_MODES for _ in BACKENDS]):
             patch.set_facecolor(colors.get(tm, "gray"))
     ax.set_ylabel("Seconds")

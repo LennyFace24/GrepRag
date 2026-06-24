@@ -82,9 +82,10 @@ def run_experiment(
         t_start = time.time()
 
         try:
-            answer = agent.run(q.query, context_file)
+            answer, raw_output = agent.run(q.query, context_file)
         except Exception as e:
             answer = f"[ERROR] {e}"
+            raw_output = ""
             print(f"    ✗ 异常: {e}")
 
         elapsed = time.time() - t_start
@@ -99,6 +100,7 @@ def run_experiment(
             "query": q.query,
             "ground_truth": q.answer,
             "prediction": answer,
+            "raw_output": raw_output[:5000],   # 截断，防止日志爆炸
             "elapsed_seconds": round(elapsed, 2),
             "timestamp": datetime.now().isoformat(),
         }

@@ -119,8 +119,8 @@ class CLIAgentRunner:
         else:
             raise ValueError(f"不支持的 backend: {backend}。可选: claude, codex")
 
-    def run(self, question: str, context_file: Path) -> str:
-        """运行 CLI agent 并返回答案（含速率控制和 429 退避）"""
+    def run(self, question: str, context_file: Path) -> tuple[str, str]:
+        """运行 CLI agent, 返回 (答案, raw_output)"""
         if self.tool_mode == "grep":
             prompt = _build_grep_prompt(question, context_file)
         else:
@@ -137,7 +137,6 @@ class CLIAgentRunner:
             _rate_limit_delay()
 
             print(f"  [{self.backend}/{self.tool_mode}] 启动 CLI (第 {attempt} 次)...")
-            print(f"  命令: {' '.join(cmd[:6])}...")
 
             try:
                 result = subprocess.run(
@@ -148,7 +147,19 @@ class CLIAgentRunner:
                     cwd=str(Path(__file__).parent.parent),
                 )
             except subprocess.TimeoutExpired:
-                return f"[TIMEOUT] CLI 运行超时 ({CLI_AGENT_TIMEOUT}秒)"
+                return f"[TIMEOUT] CLI 运行超时 ({CLI_AGENT_TIMEOUT}秒)", ""
+
+            # 打印 LLM 推理过程和搜索结果
+            print(f"  ── CLI 输出 ──")
+            for line in result.stdout.split("\n"):
+                # 跳过空行和纯格式行
+                if line.strip():
+                    print(f"  | {line[:200]}")
+            if result.stderr.strip():
+                print(f"  ── STDERR ──")
+                for line in result.stderr.split("\n")[:10]:
+                    if line.strip():
+                        print(f"  ! {line[:200]}")
 
             # 检测 429 / rate limit
             if _is_rate_limited(result.stdout, result.stderr):
@@ -161,9 +172,9 @@ class CLIAgentRunner:
             if result.returncode != 0 and not output.strip():
                 output = result.stderr or f"[ERROR] CLI 退出码 {result.returncode}"
 
-            return _extract_answer(output)
+            return _extract_answer(output), output
 
-        return f"[RATE_LIMITED] 连续触发速率限制, 已重试 {RATE_LIMIT_MAX_RETRIES} 次, 放弃"
+        return f"[RATE_LIMITED] 已重试 {RATE_LIMIT_MAX_RETRIES} 次", ""
 
     def _build_claude_cmd(self, prompt: str, context_file: Path) -> list[str]:
         """构建 Claude Code CLI 命令"""
