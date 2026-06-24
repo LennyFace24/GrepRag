@@ -53,3 +53,11 @@ _LIMIT_STR = os.getenv("LIMIT_QUESTIONS", "")
 LIMIT_QUESTIONS = int(_LIMIT_STR) if _LIMIT_STR.strip() else None
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "1"))
 RETRY_COUNT = int(os.getenv("RETRY_COUNT", "3"))
+
+# ── 速率控制 / 反风控 ──────────────────────────────────
+# 每次请求前随机延迟 (秒), 范围 [MIN, MAX]
+RATE_LIMIT_DELAY_MIN = float(os.getenv("RATE_LIMIT_DELAY_MIN", "0.5"))
+RATE_LIMIT_DELAY_MAX = float(os.getenv("RATE_LIMIT_DELAY_MAX", "2.0"))
+# 触发 429 后等待秒数 (会指数退避: wait * 1, wait * 2, wait * 4...)
+RATE_LIMIT_BACKOFF = float(os.getenv("RATE_LIMIT_BACKOFF", "5"))
+RATE_LIMIT_MAX_RETRIES = int(os.getenv("RATE_LIMIT_MAX_RETRIES", "3"))

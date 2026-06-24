@@ -1,14 +1,19 @@
 """
 CLI Agent 运行器：通过 subprocess 调用 Claude Code / Codex CLI
 对标论文的 provider-native CLI harness 实验方式
+内置随机延迟和 429 退避，防止风控
 """
 import subprocess
 import shutil
 import re
+import random
+import time
 from pathlib import Path
 
 from src.config import (
     CLI_AGENT_TIMEOUT,
+    RATE_LIMIT_DELAY_MIN, RATE_LIMIT_DELAY_MAX,
+    RATE_LIMIT_BACKOFF, RATE_LIMIT_MAX_RETRIES,
 )
 
 
@@ -48,6 +53,22 @@ def _build_vector_prompt(question: str, file_path: Path, script_path: Path) -> s
 **在你回答的最后一行，单独写一行 "答案：你的答案"，除此之外不要输出其他解释。**
 
 问题：{question}"""
+
+
+# ── 速率控制 ────────────────────────────────────────────
+
+def _rate_limit_delay():
+    """每次请求前随机 sleep，防止连续请求触发风控"""
+    delay = random.uniform(RATE_LIMIT_DELAY_MIN, RATE_LIMIT_DELAY_MAX)
+    time.sleep(delay)
+
+
+def _is_rate_limited(stdout: str, stderr: str) -> bool:
+    """检测 CLI 输出中是否包含限流信号"""
+    combined = (stdout + stderr).lower()
+    markers = ["429", "rate limit", "too many requests", "rate exceeded",
+               "quota exceeded", "try again later", "throttl"]
+    return any(m in combined for m in markers)
 
 
 # ── Output parsing ─────────────────────────────────────
@@ -99,39 +120,50 @@ class CLIAgentRunner:
             raise ValueError(f"不支持的 backend: {backend}。可选: claude, codex")
 
     def run(self, question: str, context_file: Path) -> str:
-        """运行 CLI agent 并返回答案"""
-        # 构建 prompt
+        """运行 CLI agent 并返回答案（含速率控制和 429 退避）"""
         if self.tool_mode == "grep":
             prompt = _build_grep_prompt(question, context_file)
         else:
             script_path = (Path(__file__).parent / "vector_search_cli.py").resolve()
             prompt = _build_vector_prompt(question, context_file, script_path)
 
-        # 构建命令
         if self.backend == "claude":
             cmd = self._build_claude_cmd(prompt, context_file)
         else:
             cmd = self._build_codex_cmd(prompt, context_file)
 
-        print(f"  [{self.backend}/{self.tool_mode}] 启动 CLI...")
-        print(f"  命令: {' '.join(cmd[:6])}...")
+        for attempt in range(1, RATE_LIMIT_MAX_RETRIES + 2):
+            # 随机延迟（首次也要延迟，防止连续请求）
+            _rate_limit_delay()
 
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=CLI_AGENT_TIMEOUT,
-                cwd=str(Path(__file__).parent.parent),  # 项目根目录
-            )
-        except subprocess.TimeoutExpired:
-            return f"[TIMEOUT] CLI 运行超时 ({AGENT_TIMEOUT * 3}秒)"
+            print(f"  [{self.backend}/{self.tool_mode}] 启动 CLI (第 {attempt} 次)...")
+            print(f"  命令: {' '.join(cmd[:6])}...")
 
-        output = result.stdout
-        if result.returncode != 0 and not output.strip():
-            output = result.stderr or f"[ERROR] CLI 退出码 {result.returncode}"
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=CLI_AGENT_TIMEOUT,
+                    cwd=str(Path(__file__).parent.parent),
+                )
+            except subprocess.TimeoutExpired:
+                return f"[TIMEOUT] CLI 运行超时 ({CLI_AGENT_TIMEOUT}秒)"
 
-        return _extract_answer(output)
+            # 检测 429 / rate limit
+            if _is_rate_limited(result.stdout, result.stderr):
+                wait = RATE_LIMIT_BACKOFF * (2 ** (attempt - 1))
+                print(f"    ⚠ 触发速率限制, {wait:.0f}秒后重试...")
+                time.sleep(wait)
+                continue
+
+            output = result.stdout
+            if result.returncode != 0 and not output.strip():
+                output = result.stderr or f"[ERROR] CLI 退出码 {result.returncode}"
+
+            return _extract_answer(output)
+
+        return f"[RATE_LIMITED] 连续触发速率限制, 已重试 {RATE_LIMIT_MAX_RETRIES} 次, 放弃"
 
     def _build_claude_cmd(self, prompt: str, context_file: Path) -> list[str]:
         """构建 Claude Code CLI 命令"""
