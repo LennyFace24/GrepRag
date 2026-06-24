@@ -21,36 +21,22 @@ from src.config import (
 
 def _build_grep_prompt(question: str, file_path: Path) -> str:
     """构建 grep 模式的 prompt"""
-    return f"""一段多天对话记录存储在文件 {file_path} 中。
+    return f"""搜索文件 {file_path} 中的对话记录来回答问题。
+使用 grep 命令搜索。搜1-3次，找到答案后立即停止。
 
-你只能通过 grep 命令搜索这个文件来查找信息。例如：
-  grep "关键词" {file_path}
-  grep -C 2 "正则" {file_path}
-
-搜索规则：
-- 优先用问题中出现的原词搜索
-- 如果搜不到，尝试拆分关键词、用更短的词
-- 搜索1-3次即可，找到信息后直接给出答案
-- 不要用 cat 读取整个文件，文件太长
-
-**在你回答的最后一行，单独写一行 "答案：你的答案"，除此之外不要输出其他解释。**
+在回答的最后一行，输出：
+FINAL_ANSWER: <答案内容>
 
 问题：{question}"""
 
 
 def _build_vector_prompt(question: str, file_path: Path, script_path: Path) -> str:
     """构建 vector/RAG 模式的 prompt"""
-    return f"""一段多天对话记录存储在文件 {file_path} 中。
+    return f"""搜索文件 {file_path} 中的对话记录来回答问题。
+使用 python {script_path} "{file_path}" "查询" 进行语义搜索。搜1-3次，找到答案后立即停止。
 
-你只能通过以下命令进行语义搜索（它用向量相似度查找相关内容）：
-  python {script_path} "{file_path}" "你的查询"
-
-搜索规则：
-- 用自然语言描述你想查找的信息
-- 如果第一次搜索结果不够，可以换一种表述再搜一次
-- 搜索1-3次即可，找到信息后直接给出答案
-
-**在你回答的最后一行，单独写一行 "答案：你的答案"，除此之外不要输出其他解释。**
+在回答的最后一行，输出：
+FINAL_ANSWER: <答案内容>
 
 问题：{question}"""
 
@@ -149,17 +135,15 @@ class CLIAgentRunner:
             except subprocess.TimeoutExpired:
                 return f"[TIMEOUT] CLI 运行超时 ({CLI_AGENT_TIMEOUT}秒)", ""
 
-            # 打印 LLM 推理过程和搜索结果
-            print(f"  ── CLI 输出 ──")
-            for line in result.stdout.split("\n"):
-                # 跳过空行和纯格式行
-                if line.strip():
+            # 打印 stdout + stderr（不过滤，避免漏掉输出）
+            if result.stdout.strip():
+                print(f"  ── STDOUT ──")
+                for line in result.stdout.split("\n"):
                     print(f"  | {line[:200]}")
             if result.stderr.strip():
                 print(f"  ── STDERR ──")
-                for line in result.stderr.split("\n")[:10]:
-                    if line.strip():
-                        print(f"  ! {line[:200]}")
+                for line in result.stderr.split("\n"):
+                    print(f"  ! {line[:200]}")
 
             # 检测 429 / rate limit
             if _is_rate_limited(result.stdout, result.stderr):
@@ -168,11 +152,14 @@ class CLIAgentRunner:
                 time.sleep(wait)
                 continue
 
-            output = result.stdout
-            if result.returncode != 0 and not output.strip():
-                output = result.stderr or f"[ERROR] CLI 退出码 {result.returncode}"
+            # 合并 stdout + stderr（某些 CLI 把实际输出写到 stderr）
+            raw_output = result.stdout
+            if not raw_output.strip() or result.returncode != 0:
+                raw_output = (result.stdout + "\n" + result.stderr).strip()
+            if not raw_output:
+                raw_output = f"[EMPTY] CLI 退出码 {result.returncode}"
 
-            return _extract_answer(output), output
+            return _extract_answer(raw_output), raw_output
 
         return f"[RATE_LIMITED] 已重试 {RATE_LIMIT_MAX_RETRIES} 次", ""
 
