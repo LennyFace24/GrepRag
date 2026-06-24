@@ -1,212 +1,108 @@
 """
-CLI Agent 运行器：通过 subprocess 调用 Claude Code / Codex CLI
-对标论文的 provider-native CLI harness 实验方式
-内置随机延迟和 429 退避，防止风控
+CLI Agent：通过 subprocess 调用 Claude Code / Codex CLI
 """
-import subprocess
-import shutil
-import re
-import random
-import time
+import subprocess, shutil, re, random, time
 from pathlib import Path
-
-from src.config import (
-    CLI_AGENT_TIMEOUT, CLI_TEMPERATURE,
-    RATE_LIMIT_DELAY_MIN, RATE_LIMIT_DELAY_MAX,
-    RATE_LIMIT_BACKOFF, RATE_LIMIT_MAX_RETRIES,
-)
-
-
-# ── Prompts ────────────────────────────────────────────
-
-def _build_grep_prompt(question: str, file_path: Path) -> str:
-    """构建 grep 模式的 prompt"""
-    return f"""搜索文件 {file_path} 中的对话记录来回答问题。
-使用 grep 命令搜索。搜1-3次，找到答案后立即停止。
-
-在回答的最后一行，输出：
-FINAL_ANSWER: <答案内容>
-
-问题：{question}"""
-
-
-def _build_vector_prompt(question: str, file_path: Path, script_path: Path) -> str:
-    """构建 vector/RAG 模式的 prompt"""
-    return f"""搜索文件 {file_path} 中的对话记录来回答问题。
-使用 python {script_path} "{file_path}" "查询" 进行语义搜索。搜1-3次，找到答案后立即停止。
-
-在回答的最后一行，输出：
-FINAL_ANSWER: <答案内容>
-
-问题：{question}"""
-
+from src.config import CLI_TIMEOUT, CLI_TEMP, DELAY_MIN, DELAY_MAX, RL_BACKOFF, RL_RETRIES
 
 # ── 速率控制 ────────────────────────────────────────────
 
-def _rate_limit_delay():
-    """每次请求前随机 sleep，防止连续请求触发风控"""
-    delay = random.uniform(RATE_LIMIT_DELAY_MIN, RATE_LIMIT_DELAY_MAX)
-    time.sleep(delay)
+def _jitter():
+    time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
 
+def _is_rate_limited(out: str) -> bool:
+    return any(m in out.lower() for m in
+        ["429", "rate limit", "too many requests", "rate exceeded",
+         "quota exceeded", "try again later", "throttl"])
 
-def _is_rate_limited(stdout: str, stderr: str) -> bool:
-    """检测 CLI 输出中是否包含限流信号"""
-    combined = (stdout + stderr).lower()
-    markers = ["429", "rate limit", "too many requests", "rate exceeded",
-               "quota exceeded", "try again later", "throttl"]
-    return any(m in combined for m in markers)
-
-
-# ── Output parsing ─────────────────────────────────────
+# ── 答案提取 ────────────────────────────────────────────
 
 def _extract_answer(output: str) -> str:
-    """
-    从 CLI 输出中提取最终答案
-    优先匹配 "答案：xxx" 格式，否则取最后一段非空内容
-    """
-    # 匹配 "答案：xxx"
-    match = re.search(r'答案[：:]\s*(.+?)(?:\n|$)', output)
-    if match:
-        return match.group(1).strip()
-
-    # 回退：取最后一行有意义的内容
+    """匹配 FINAL_ANSWER: xxx 或 答案：xxx，否则取最后一行"""
+    for pat in [r'FINAL_ANSWER:\s*(.+)', r'答案[：:]\s*(.+)']:
+        m = re.search(pat, output)
+        if m:
+            ans = m.group(1).strip()
+            if ans not in ("你的答案", "答案内容", "<答案内容>"):  # 排除 prompt 模板
+                return ans
     lines = [l.strip() for l in output.split("\n") if l.strip()]
-    if lines:
-        return lines[-1][:200]
+    return lines[-1][:200] if lines else "[EMPTY]"
 
-    return "[EMPTY] CLI 没有产生有效输出"
+# ── Prompt ──────────────────────────────────────────────
 
+def _prompt(question: str, file_path: Path, tool_mode: str) -> str:
+    if tool_mode == "grep":
+        tool = f"grep 搜索文件 {file_path}"
+    else:
+        script = (Path(__file__).parent / "vector_search_cli.py").resolve()
+        tool = f"python {script} \"{file_path}\" \"查询\""
+    return f"在 {file_path} 中搜索对话记录来回答问题。用 {tool}。\n最后一行输出: FINAL_ANSWER: <答案>\n问题: {question}"
 
-# ── CLI Agent Runner ───────────────────────────────────
+# ── CLI Runner ──────────────────────────────────────────
+
+_ERROR_MARKERS = ["cannot be used with root", "permission denied", "command not found",
+                  "usage:", "api key", "authentication", "unauthorized"]
 
 class CLIAgentRunner:
-    """通过 subprocess 调用 CLI agent"""
-
     def __init__(self, backend: str, tool_mode: str, model_name: str | None = None):
-        """
-        Args:
-            backend: "claude" | "codex"
-            tool_mode: "grep" | "vector"
-            model_name: 覆盖默认模型
-        """
         self.backend = backend
         self.tool_mode = tool_mode
         self._model = model_name
+        self._bin = shutil.which(backend)
+        if not self._bin:
+            raise RuntimeError(f"{backend} CLI 未安装")
 
-        # 验证 CLI 可用
-        if backend == "claude":
-            self._cli_bin = shutil.which("claude")
-            if not self._cli_bin:
-                raise RuntimeError("claude CLI 未安装或不在 PATH 中")
-        elif backend == "codex":
-            self._cli_bin = shutil.which("codex")
-            if not self._cli_bin:
-                raise RuntimeError("codex CLI 未安装或不在 PATH 中")
-        else:
-            raise ValueError(f"不支持的 backend: {backend}。可选: claude, codex")
+    def run(self, question: str, ctx_file: Path) -> tuple[str, str]:
+        prompt = _prompt(question, ctx_file, self.tool_mode)
+        cmd = self._cmd(prompt, ctx_file)
 
-    def run(self, question: str, context_file: Path) -> tuple[str, str]:
-        """运行 CLI agent, 返回 (答案, raw_output)"""
-        if self.tool_mode == "grep":
-            prompt = _build_grep_prompt(question, context_file)
-        else:
-            script_path = (Path(__file__).parent / "vector_search_cli.py").resolve()
-            prompt = _build_vector_prompt(question, context_file, script_path)
-
-        if self.backend == "claude":
-            cmd = self._build_claude_cmd(prompt, context_file)
-        else:
-            cmd = self._build_codex_cmd(prompt, context_file)
-
-        for attempt in range(1, RATE_LIMIT_MAX_RETRIES + 2):
-            # 随机延迟（首次也要延迟，防止连续请求）
-            _rate_limit_delay()
-
-            print(f"  [{self.backend}/{self.tool_mode}] 启动 CLI (第 {attempt} 次)...")
+        for attempt in range(1, RL_RETRIES + 2):
+            _jitter()
+            print(f"  [{self.backend}/{self.tool_mode}] #{attempt}...")
 
             try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=CLI_AGENT_TIMEOUT,
-                    cwd=str(Path(__file__).parent.parent),
-                )
+                r = subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=CLI_TIMEOUT,
+                                   cwd=str(Path(__file__).parent.parent))
             except subprocess.TimeoutExpired:
-                return f"[TIMEOUT] CLI 运行超时 ({CLI_AGENT_TIMEOUT}秒)", ""
+                return f"[TIMEOUT] {CLI_TIMEOUT}s", ""
 
-            # 打印 stdout + stderr（不过滤，避免漏掉输出）
-            if result.stdout.strip():
-                print(f"  ── STDOUT ──")
-                for line in result.stdout.split("\n"):
-                    print(f"  | {line[:200]}")
-            if result.stderr.strip():
-                print(f"  ── STDERR ──")
-                for line in result.stderr.split("\n"):
-                    print(f"  ! {line[:200]}")
+            raw = (r.stdout + "\n" + r.stderr).strip()
+            for line in raw.split("\n"):
+                print(f"  | {line[:200]}")
+            if not raw:
+                raw = f"[EMPTY] exit={r.returncode}"
 
-            # 检测 429 / rate limit
-            if _is_rate_limited(result.stdout, result.stderr):
-                wait = RATE_LIMIT_BACKOFF * (2 ** (attempt - 1))
-                print(f"    ⚠ 触发速率限制, {wait:.0f}秒后重试...")
+            if _is_rate_limited(raw):
+                wait = RL_BACKOFF * (2 ** (attempt - 1))
+                print(f"    ⚠ rate limited, {wait:.0f}s 后重试")
                 time.sleep(wait)
                 continue
 
-            # 合并 stdout + stderr（某些 CLI 把实际输出写到 stderr）
-            raw_output = result.stdout
-            if not raw_output.strip() or result.returncode != 0:
-                raw_output = (result.stdout + "\n" + result.stderr).strip()
-            if not raw_output:
-                raw_output = f"[EMPTY] CLI 退出码 {result.returncode}"
+            ans = _extract_answer(raw)
+            if any(m in ans.lower() for m in _ERROR_MARKERS):
+                return f"[CLI_ERROR] {ans[:100]}", raw
+            return ans, raw
 
-            return _extract_answer(raw_output), raw_output
+        return f"[RATE_LIMITED] 重试{RL_RETRIES}次", ""
 
-        return f"[RATE_LIMITED] 已重试 {RATE_LIMIT_MAX_RETRIES} 次", ""
-
-    def _build_claude_cmd(self, prompt: str, context_file: Path) -> list[str]:
-        """构建 Claude Code CLI 命令"""
-        context_dir = str(context_file.parent.resolve())
-
-        cmd = [
-            self._cli_bin,
-            "-p", prompt,
-            "--output-format", "text",
-            "--add-dir", context_dir,
-            "--max-budget-usd", "1",
-        ]
-
-        # 自动化标志：跳过权限确认
-        cmd += ["--dangerously-skip-permissions"]
-
-        # temperature（通过 JSON settings 注入）
-        cmd += ["--settings", f'{{"temperature":{CLI_TEMPERATURE}}}']
-
-        # 工具白名单
-        if self.tool_mode == "grep":
-            cmd += ["--allowedTools", f"Bash(grep:*)", f"Bash(cat:{context_file})"]
+    def _cmd(self, prompt: str, ctx_file: Path) -> list[str]:
+        d = str(ctx_file.parent.resolve())
+        if self.backend == "claude":
+            c = [self._bin, "-p", prompt, "--output-format", "text",
+                 "--add-dir", d, "--max-budget-usd", "1",
+                 "--settings", f'{{"temperature":{CLI_TEMP}}}']
+            if self.tool_mode == "grep":
+                c += ["--allowedTools", f"Bash(grep:*)", f"Bash(cat:{ctx_file})"]
+            else:
+                c += ["--allowedTools", "Bash(python:*)"]
+            if self._model:
+                c += ["--model", self._model]
         else:
-            cmd += ["--allowedTools", "Bash(python:*)"]
-
-        # 模型
-        if self._model:
-            cmd += ["--model", self._model]
-
-        return cmd
-
-    def _build_codex_cmd(self, prompt: str, context_file: Path) -> list[str]:
-        """构建 Codex CLI 命令"""
-        context_dir = str(context_file.parent.resolve())
-
-        cmd = [
-            self._cli_bin, "exec", prompt,
-            "--add-dir", context_dir,
-            "--sandbox", "workspace-write",
-            "--dangerously-bypass-approvals-and-sandbox",
-        ]
-
-        # 模型 + temperature
-        cmd += ["-c", f"temperature={CLI_TEMPERATURE}"]
-        if self._model:
-            cmd += ["--model", self._model]
-
-        return cmd
+            c = [self._bin, "exec", prompt, "--add-dir", d,
+                 "--sandbox", "workspace-write",
+                 "--dangerously-bypass-approvals-and-sandbox",
+                 "-c", f"temperature={CLI_TEMP}"]
+            if self._model:
+                c += ["--model", self._model]
+        return c
