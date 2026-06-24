@@ -5,7 +5,7 @@ import argparse, sys, numpy as np
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.embedding import create, chunk
-from src.config import TOP_K, EMBED_PROVIDER, QWEN_EMBED_ENDPOINT, QWEN_EMBED_KEY, QWEN_EMBED_MODEL
+from src.config import TOP_K, EMBED_PROVIDER, EMBED_MODEL, QWEN_EMBED_MODEL
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("file"); ap.add_argument("query")
@@ -14,8 +14,10 @@ def main():
     f = Path(args.file)
     if not f.exists(): sys.exit(print(f"[错误] {args.file} 不存在", file=sys.stderr))
     if EMBED_PROVIDER == "qwen":
+        print(f"[VectorSearch] 使用 Qwen API: {QWEN_EMBED_MODEL}", file=sys.stderr)
         e = create("qwen", model=QWEN_EMBED_MODEL)
     else:
+        print(f"[VectorSearch] 使用本地 BGE: {EMBED_MODEL}", file=sys.stderr)
         e = create("bge")
     chunks = chunk(f.read_text(encoding="utf-8"))
     print(f"[VectorSearch] {len(chunks)} chunks, 建索引中...", file=sys.stderr)
